@@ -2,7 +2,7 @@ import pdfplumber
 import requests
 from io import BytesIO
 from datetime import datetime
-from supabase import create_client, Client
+from supabase import create_client
 import logging
 import os
 from config import SUPABASE_URL, SUPABASE_ANON_KEY, TABLE_NAME, LOG_FILE, LOG_LEVEL
@@ -21,7 +21,7 @@ logging.basicConfig(
 class CaragaPriceScraper:
     def __init__(self):
         """Initialize Supabase client"""
-        self.supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+        self.supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
         logging.info("Scraper initialized")
         
     def download_pdf(self, pdf_url):
@@ -40,7 +40,6 @@ class CaragaPriceScraper:
         """Extract commodity data from PDF"""
         commodities = []
         
-        # Categories to exclude (non-food items)
         EXCLUDED_CATEGORIES = [
             'FERTILIZER', 
             'INSECTICIDE', 
@@ -203,19 +202,11 @@ class CaragaPriceScraper:
 
 def main(pdf_url=None):
     """Main entry point"""
-    from config import DEFAULT_PDF_URLS
-    
-    if not pdf_url:
-        # Use default URLs if none provided
-        pdf_url = DEFAULT_PDF_URLS
-    
     scraper = CaragaPriceScraper()
     return scraper.run(pdf_url)
 
 
 if __name__ == "__main__":
     import sys
-    
     pdf_url = sys.argv[1] if len(sys.argv) > 1 else None
-    
     main(pdf_url)
