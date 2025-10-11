@@ -1,8 +1,8 @@
-pdfplumber==0.11.7
+pdfplumber==0.10.3
 requests==2.31.0
-supabase==2.9.0
+supabase==1.0.3
+postgrest==0.10.6
 schedule==1.2.2
-selenium==4.36.0
-beautifulsoup4==4.14.2
+selenium==4.15.0
+beautifulsoup4==4.12.2
 python-dotenv==1.0.1
-lxml==5.1.0
