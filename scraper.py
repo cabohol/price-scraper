@@ -5,6 +5,7 @@ from datetime import datetime
 import logging
 import os
 import json
+import time
 from config import SUPABASE_URL, SUPABASE_ANON_KEY, GROQ_API_KEY, TABLE_NAME, LOG_FILE, LOG_LEVEL
 
 # Setup logging
@@ -36,8 +37,10 @@ class CaragaPriceScraper:
         
         logging.info("Scraper initialized with AI enrichment")
         
-    def get_ai_nutrition(self, name, category):
-        """Get nutritional data from Llama 3.3 70B via direct HTTP"""
+    def get_ai_nutrition(self, name, category, retry_count=0):
+        """Get nutritional data from Llama 3.3 70B with retry logic"""
+        max_retries = 3
+        
         try:
             prompt = f"""
 Provide accurate nutritional information for this ingredient:
@@ -46,25 +49,28 @@ Category: {category}
 
 Return ONLY a valid JSON object (no markdown, no explanation) with these exact fields:
 {{
-    "carbs_grams": <float - carbohydrates per 100g>,
-    "calories_per_serving": <int - calories per 100g serving>,
-    "protein_grams": <float - protein per 100g>,
-    "fat_grams": <float - fat per 100g>,
-    "fiber_grams": <float - fiber per 100g>,
-    "glycemic_index": <int - 0-100, estimate if unknown>,
-    "is_diabetic_friendly": <bool - low GI and suitable>,
-    "is_vegetarian": <bool>,
-    "is_vegan": <bool>,
-    "is_halal": <bool>,
-    "is_kosher": <bool>,
-    "is_catholic": <bool - no restrictions>,
-    "common_allergens": <string or null - comma separated if multiple>
+    "carbs_grams": <float - carbohydrates per 100g, MUST be a number not null>,
+    "calories_per_serving": <int - calories per 100g serving, MUST be a number not null>,
+    "protein_grams": <float - protein per 100g, MUST be a number not null>,
+    "fat_grams": <float - total fat per 100g, MUST be a number not null>,
+    "fiber_grams": <float - dietary fiber per 100g, MUST be a number not null>,
+    "glycemic_index": <int - 0-100, estimate if unknown, MUST be a number not null>,
+    "is_diabetic_friendly": <bool - low GI and suitable for diabetics>,
+    "is_vegetarian": "<bool - true if contains no meat, poultry, or fish; may include dairy or eggs>",
+    "is_vegan": "<bool - true if contains no animal-derived ingredients, including dairy, eggs, honey, or gelatin>",
+    "is_halal": "<bool - true if all ingredients are halal-certified or contain no pork/alcohol; meat must be slaughtered per Islamic law>",
+    "is_kosher": "<bool - true if ingredients and preparation comply with Jewish dietary laws (no pork, shellfish, or mixing meat and dairy)>",
+    "is_catholic": "<bool - true if compliant with Catholic fasting rules: no meat on Fridays or during Lent>"
+    "common_allergens": <string - comma separated allergens like "gluten, dairy, nuts, eggs" or "none" if no allergens, NEVER null>
 }}
 
-Use standard nutrition databases. Be accurate and scientific.
+IMPORTANT: 
+- ALL numeric fields MUST have actual numbers, never null
+- common_allergens MUST be a string, use "none" if no allergens, NEVER null
+- Use standard USDA nutrition database values
+- Be accurate and scientific
 """
             
-            # Direct HTTP request to Groq API
             headers = {
                 "Authorization": f"Bearer {self.groq_api_key}",
                 "Content-Type": "application/json"
@@ -73,48 +79,82 @@ Use standard nutrition databases. Be accurate and scientific.
             payload = {
                 "model": "llama-3.3-70b-versatile",
                 "messages": [
-                    {"role": "system", "content": "You are a nutrition expert. Return only valid JSON."},
+                    {"role": "system", "content": "You are a nutrition expert. Return only valid JSON with NO null values."},
                     {"role": "user", "content": prompt}
                 ],
-                "temperature": 0.3,
-                "max_tokens": 1000
+                "temperature": 0.7,
+                "max_tokens": 10000
             }
             
             response = requests.post(self.groq_url, headers=headers, json=payload, timeout=30)
             response.raise_for_status()
             
-            # Parse response
             result = response.json()
             ai_response = result['choices'][0]['message']['content'].strip()
             
-            # Remove markdown code blocks if present
+            # Remove markdown code blocks
             if ai_response.startswith('```'):
                 ai_response = ai_response.split('```')[1]
                 if ai_response.startswith('json'):
                     ai_response = ai_response[4:]
+                ai_response = ai_response.rsplit('```', 1)[0]
             
             nutrition_data = json.loads(ai_response)
-            logging.info(f"AI nutrition data obtained for {name}")
+            
+            # Ensure no null values
+            if nutrition_data.get('common_allergens') is None:
+                nutrition_data['common_allergens'] = "none"
+            
+            # Ensure all required fields exist with non-null values
+            required_fields = {
+                "carbs_grams": 0.0,
+                "calories_per_serving": 0,
+                "protein_grams": 0.0,
+                "fat_grams": 0.0,
+                "fiber_grams": 0.0,
+                "glycemic_index": 50,
+                "common_allergens": "none"
+            }
+            
+            for field, default in required_fields.items():
+                if nutrition_data.get(field) is None:
+                    nutrition_data[field] = default
+            
+            logging.info(f"AI nutrition obtained for {name}")
             return nutrition_data
             
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 429 and retry_count < max_retries:
+                # Rate limit - wait and retry
+                wait_time = 60 * (retry_count + 1)
+                logging.warning(f"Rate limited, waiting {wait_time}s... (retry {retry_count + 1}/{max_retries})")
+                time.sleep(wait_time)
+                return self.get_ai_nutrition(name, category, retry_count + 1)
+            else:
+                logging.error(f"AI error for {name}: {e}")
+                return self.get_default_nutrition()
+                
         except Exception as e:
             logging.error(f"AI nutrition error for {name}: {e}")
-            # Return default values if AI fails
-            return {
-                "carbs_grams": None,
-                "calories_per_serving": None,
-                "protein_grams": None,
-                "fat_grams": None,
-                "fiber_grams": None,
-                "glycemic_index": None,
-                "is_diabetic_friendly": False,
-                "is_vegetarian": True,
-                "is_vegan": False,
-                "is_halal": True,
-                "is_kosher": False,
-                "is_catholic": True,
-                "common_allergens": None
-            }
+            return self.get_default_nutrition()
+    
+    def get_default_nutrition(self):
+        """Return default nutrition values (NO nulls)"""
+        return {
+            "carbs_grams": 0.0,
+            "calories_per_serving": 0,
+            "protein_grams": 0.0,
+            "fat_grams": 0.0,
+            "fiber_grams": 0.0,
+            "glycemic_index": 50,
+            "is_diabetic_friendly": True,
+            "is_vegetarian": True,
+            "is_vegan": True,
+            "is_halal": True,
+            "is_kosher": True,
+            "is_catholic": True,
+            "common_allergens": "none"
+        }
     
     def download_pdf(self, pdf_url):
         """Download PDF from URL"""
@@ -166,7 +206,6 @@ Use standard nutrition databases. Be accurate and scientific.
                             
                             commodity_group = current_category
                             commodity_name = (row[1] or "").strip()
-                            specification = (row[2] or "").strip()
                             unit = (row[3] or "").strip()
                             average_price_str = (row[-1] or "").strip()
                             
@@ -196,8 +235,24 @@ Use standard nutrition databases. Be accurate and scientific.
         
         return commodities
     
+    def needs_nutrition_update(self, item_name):
+        """Check if ingredient needs nutrition data"""
+        from urllib.parse import quote
+        encoded_name = quote(item_name)
+        
+        # Check if has nutrition data
+        check_url = f"{self.supabase_url}/rest/v1/{TABLE_NAME}?name=eq.{encoded_name}&select=id,carbs_grams,calories_per_serving"
+        response = requests.get(check_url, headers=self.headers)
+        
+        if response.json():
+            data = response.json()[0]
+            # Needs update if carbs or calories are null
+            return data.get('carbs_grams') is None or data.get('calories_per_serving') is None
+        
+        return True  # New item, needs nutrition
+    
     def insert_to_supabase(self, commodities):
-        """Insert with AI-generated nutritional data"""
+        """Insert/update with AI nutrition (only for items without nutrition data)"""
         if not commodities:
             return 0
         
@@ -212,36 +267,60 @@ Use standard nutrition databases. Be accurate and scientific.
                 encoded_name = quote(item['name'])
                 
                 # Check if exists
-                check_url = f"{self.supabase_url}/rest/v1/{TABLE_NAME}?name=eq.{encoded_name}&select=id"
+                check_url = f"{self.supabase_url}/rest/v1/{TABLE_NAME}?name=eq.{encoded_name}&select=id,carbs_grams"
                 check_response = requests.get(check_url, headers=self.headers)
                 
-                # Get AI nutrition data
-                print(f"🤖 Getting AI nutrition for: {item['name']}")
-                nutrition = self.get_ai_nutrition(item['name'], item['category'])
-                
-                # Combine price + nutrition data
-                data = {
-                    'name': item['name'],
-                    'category': item['category'],
-                    'typical_serving_size': f"100 {item['unit']}",
-                    'price_range': price_range,
-                    'cost_per_serving': item['average_price'],
-                    'availability': 'available',
-                    'updated_at': datetime.now().isoformat(),
-                    # AI-generated nutrition
-                    **nutrition
-                }
-                
                 if check_response.json():
-                    # Update
+                    # EXISTING ingredient
                     record_id = check_response.json()[0]['id']
+                    has_nutrition = check_response.json()[0].get('carbs_grams') is not None
+                    
+                    if has_nutrition:
+                        # ✅ HAS NUTRITION - Update price only
+                        data = {
+                            'price_range': price_range,
+                            'cost_per_serving': item['average_price'],
+                            'availability': 'available',
+                            'updated_at': datetime.now().isoformat()
+                        }
+                        logging.info(f"Updating price only: {item['name']}")
+                    else:
+                        # ⚠️ MISSING NUTRITION - Get AI data
+                        print(f"🤖 Getting missing nutrition for: {item['name']}")
+                        nutrition = self.get_ai_nutrition(item['name'], item['category'])
+                        time.sleep(2)  # Rate limit delay
+                        
+                        data = {
+                            'price_range': price_range,
+                            'cost_per_serving': item['average_price'],
+                            'availability': 'available',
+                            'updated_at': datetime.now().isoformat(),
+                            **nutrition
+                        }
+                        logging.info(f"Updating with AI nutrition: {item['name']}")
+                    
                     update_url = f"{self.supabase_url}/rest/v1/{TABLE_NAME}?id=eq.{record_id}"
                     requests.patch(update_url, headers=self.headers, json=data)
                     updated += 1
-                    logging.info(f"Updated with AI: {item['name']}")
+                    
                 else:
-                    # Insert
-                    data['created_at'] = datetime.now().isoformat()
+                    # ➕ NEW ingredient - Get AI nutrition
+                    print(f"🤖 Getting AI nutrition for NEW: {item['name']}")
+                    nutrition = self.get_ai_nutrition(item['name'], item['category'])
+                    time.sleep(2)  # Rate limit delay
+                    
+                    data = {
+                        'name': item['name'],
+                        'category': item['category'],
+                        'typical_serving_size': f"100 {item['unit']}",
+                        'price_range': price_range,
+                        'cost_per_serving': item['average_price'],
+                        'availability': 'available',
+                        'created_at': datetime.now().isoformat(),
+                        'updated_at': datetime.now().isoformat(),
+                        **nutrition
+                    }
+                    
                     insert_url = f"{self.supabase_url}/rest/v1/{TABLE_NAME}"
                     requests.post(insert_url, headers=self.headers, json=data)
                     inserted += 1
@@ -271,7 +350,7 @@ Use standard nutrition databases. Be accurate and scientific.
         if not commodities:
             return False
         
-        print(f"💾 Saving {len(commodities)} items with AI nutrition...")
+        print(f"💾 Processing {len(commodities)} items...")
         count = self.insert_to_supabase(commodities)
         
         print(f"✅ Done! Processed {count} items")
