@@ -122,8 +122,12 @@ class CaragaPriceScraper:
             try:
                 price_range = f"₱{item['average_price']:.2f} per {item['unit']}"
                 
+                # URL encode the name for query
+                from urllib.parse import quote
+                encoded_name = quote(item['name'])
+                
                 # Check if exists via HTTP
-                check_url = f"{self.supabase_url}/rest/v1/{TABLE_NAME}?name=eq.{item['name']}&select=id"
+                check_url = f"{self.supabase_url}/rest/v1/{TABLE_NAME}?name=eq.{encoded_name}&select=id"
                 check_response = requests.get(check_url, headers=self.headers)
                 
                 data = {
@@ -161,6 +165,8 @@ class CaragaPriceScraper:
     def run(self, pdf_url):
         """Main function"""
         logging.info("="*60)
+        logging.info(f"Processing PDF: {pdf_url}")
+        
         print("\nDownloading PDF...")
         pdf_file = self.download_pdf(pdf_url)
         
@@ -174,7 +180,19 @@ class CaragaPriceScraper:
             return False
         
         print(f"Saving {len(commodities)} items...")
-        self.insert_to_supabase(commodities)
+        count = self.insert_to_supabase(commodities)
         
-        print("✅ Done!")
+        print(f"✅ Done! Processed {count} items")
         return True
+
+
+def main(pdf_url=None):
+    """Main entry point"""
+    scraper = CaragaPriceScraper()
+    return scraper.run(pdf_url)
+
+
+if __name__ == "__main__":
+    import sys
+    pdf_url = sys.argv[1] if len(sys.argv) > 1 else None
+    main(pdf_url)
