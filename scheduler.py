@@ -4,8 +4,7 @@ from datetime import datetime
 import logging
 from scraper import CaragaPriceScraper
 from config import SCHEDULE_TIME, LOG_FILE, MARKETS
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
+import requests
 from bs4 import BeautifulSoup
 
 # Setup logging
@@ -19,39 +18,46 @@ logging.basicConfig(
 )
 
 def get_latest_pdf_url(market_url):
-    """Scrape the CARAGA website to get the latest PDF URL"""
+    """Get latest PDF URL using HTTP requests only (no Selenium)"""
     try:
         logging.info(f"Fetching latest PDF from: {market_url}")
         
-        # Setup headless Chrome
-        chrome_options = Options()
-        chrome_options.add_argument('--headless')
-        chrome_options.add_argument('--no-sandbox')
-        chrome_options.add_argument('--disable-dev-shm-usage')
+        # Make simple HTTP request
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(market_url, headers=headers, timeout=30)
+        response.raise_for_status()
         
-        driver = webdriver.Chrome(options=chrome_options)
-        driver.get(market_url)
-        time.sleep(3)
+        # Parse HTML
+        soup = BeautifulSoup(response.text, 'html.parser')
         
-        soup = BeautifulSoup(driver.page_source, 'html.parser')
-        
-        # Find the first PDF link
-        links = soup.find_all('a', href=True)
-        
-        for link in links:
+        # Find all PDF links
+        pdf_links = []
+        for link in soup.find_all('a', href=True):
             href = link['href']
+            
+            # Check if it's a price monitoring PDF
             if 'PriceMonitoring' in href and '.pdf' in href:
-                pdf_url = href if href.startswith('http') else f"https://caraga.da.gov.ph{href}"
-                driver.quit()
-                logging.info(f"Found latest PDF: {pdf_url}")
-                return pdf_url
+                # Make full URL
+                if href.startswith('http'):
+                    pdf_url = href
+                else:
+                    pdf_url = f"https://caraga.da.gov.ph{href}"
+                
+                pdf_links.append(pdf_url)
         
-        driver.quit()
-        logging.warning(f"No PDF found on {market_url}")
-        return None
+        if pdf_links:
+            # Return the FIRST PDF found (usually the latest)
+            latest_pdf = pdf_links[0]
+            logging.info(f"Found latest PDF: {latest_pdf}")
+            return latest_pdf
+        else:
+            logging.warning(f"No PDF found on {market_url}")
+            return None
         
     except Exception as e:
-        logging.error(f"Error getting latest PDF from {market_url}: {e}")
+        logging.error(f"Error fetching PDF from {market_url}: {e}")
         return None
 
 def daily_update_job():
@@ -101,7 +107,7 @@ def daily_update_job():
             print("✅ Daily update completed!")
         else:
             logging.error("Scheduled update failed - no markets processed")
-            print("❌ Daily update failed - no markets processed")
+            print("❌ Daily update failed")
             
     except Exception as e:
         logging.error(f"Error in scheduled job: {e}")
@@ -123,7 +129,7 @@ def run_scheduler():
     # Schedule the job to run daily
     schedule.every().day.at(SCHEDULE_TIME).do(daily_update_job)
     
-    # Optional: Run immediately on start
+    # Run immediately on start
     print("🚀 Running initial update now...\n")
     daily_update_job()
     
@@ -131,7 +137,7 @@ def run_scheduler():
     print(f"\n⏳ Waiting for next scheduled run at {SCHEDULE_TIME}...")
     while True:
         schedule.run_pending()
-        time.sleep(60)  # Check every minute
+        time.sleep(60)
 
 if __name__ == "__main__":
     try:
