@@ -4,7 +4,9 @@ from io import BytesIO
 from datetime import datetime
 import logging
 import os
-from config import SUPABASE_URL, SUPABASE_ANON_KEY, TABLE_NAME, LOG_FILE, LOG_LEVEL
+import json
+from groq import Groq
+from config import SUPABASE_URL, SUPABASE_ANON_KEY, GROQ_API_KEY, TABLE_NAME, LOG_FILE, LOG_LEVEL
 
 # Setup logging
 os.makedirs('logs', exist_ok=True)
@@ -19,7 +21,7 @@ logging.basicConfig(
 
 class CaragaPriceScraper:
     def __init__(self):
-        """Initialize with direct HTTP requests - NO SUPABASE LIBRARY"""
+        """Initialize scraper with Supabase and Groq AI"""
         self.supabase_url = SUPABASE_URL
         self.supabase_key = SUPABASE_ANON_KEY
         self.headers = {
@@ -28,8 +30,82 @@ class CaragaPriceScraper:
             'Content-Type': 'application/json',
             'Prefer': 'return=representation'
         }
-        logging.info("Scraper initialized (direct HTTP)")
         
+        # Initialize Groq AI
+        self.groq_client = Groq(api_key=GROQ_API_KEY)
+        
+        logging.info("Scraper initialized with AI enrichment")
+        
+    def get_ai_nutrition(self, name, category):
+        """Get nutritional data from Llama 3.3 70B via Groq"""
+        try:
+            prompt = f"""
+Provide accurate nutritional information for this ingredient:
+Name: {name}
+Category: {category}
+
+Return ONLY a valid JSON object (no markdown, no explanation) with these exact fields:
+{{
+    "carbs_grams": <float - carbohydrates per 100g>,
+    "calories_per_serving": <int - calories per 100g serving>,
+    "protein_grams": <float - protein per 100g>,
+    "fat_grams": <float - fat per 100g>,
+    "fiber_grams": <float - fiber per 100g>,
+    "glycemic_index": <int - 0-100, estimate if unknown>,
+    "is_diabetic_friendly": <bool - low GI and suitable>,
+    "is_vegetarian": <bool>,
+    "is_vegan": <bool>,
+    "is_halal": <bool>,
+    "is_kosher": <bool>,
+    "is_catholic": <bool - no restrictions>,
+    "common_allergens": <string or null - comma separated if multiple>
+}}
+
+Use standard nutrition databases. Be accurate and scientific.
+"""
+            
+            response = self.groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": "You are a nutrition expert. Return only valid JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.5,
+                max_tokens=1000
+            )
+            
+            # Parse AI response
+            ai_response = response.choices[0].message.content.strip()
+            
+            # Remove markdown code blocks if present
+            if ai_response.startswith('```'):
+                ai_response = ai_response.split('```')[1]
+                if ai_response.startswith('json'):
+                    ai_response = ai_response[4:]
+            
+            nutrition_data = json.loads(ai_response)
+            logging.info(f"AI nutrition data obtained for {name}")
+            return nutrition_data
+            
+        except Exception as e:
+            logging.error(f"AI nutrition error for {name}: {e}")
+            # Return default values if AI fails
+            return {
+                "carbs_grams": None,
+                "calories_per_serving": None,
+                "protein_grams": None,
+                "fat_grams": None,
+                "fiber_grams": None,
+                "glycemic_index": None,
+                "is_diabetic_friendly": False,
+                "is_vegetarian": True,
+                "is_vegan": False,
+                "is_halal": True,
+                "is_kosher": False,
+                "is_catholic": True,
+                "common_allergens": None
+            }
+    
     def download_pdf(self, pdf_url):
         """Download PDF from URL"""
         try:
@@ -111,7 +187,7 @@ class CaragaPriceScraper:
         return commodities
     
     def insert_to_supabase(self, commodities):
-        """Insert using direct HTTP requests"""
+        """Insert with AI-generated nutritional data"""
         if not commodities:
             return 0
         
@@ -122,14 +198,18 @@ class CaragaPriceScraper:
             try:
                 price_range = f"₱{item['average_price']:.2f} per {item['unit']}"
                 
-                # URL encode the name for query
                 from urllib.parse import quote
                 encoded_name = quote(item['name'])
                 
-                # Check if exists via HTTP
+                # Check if exists
                 check_url = f"{self.supabase_url}/rest/v1/{TABLE_NAME}?name=eq.{encoded_name}&select=id"
                 check_response = requests.get(check_url, headers=self.headers)
                 
+                # Get AI nutrition data
+                print(f"🤖 Getting AI nutrition for: {item['name']}")
+                nutrition = self.get_ai_nutrition(item['name'], item['category'])
+                
+                # Combine price + nutrition data
                 data = {
                     'name': item['name'],
                     'category': item['category'],
@@ -137,23 +217,25 @@ class CaragaPriceScraper:
                     'price_range': price_range,
                     'cost_per_serving': item['average_price'],
                     'availability': 'available',
-                    'updated_at': datetime.now().isoformat()
+                    'updated_at': datetime.now().isoformat(),
+                    # AI-generated nutrition
+                    **nutrition
                 }
                 
                 if check_response.json():
-                    # Update via HTTP PATCH
+                    # Update
                     record_id = check_response.json()[0]['id']
                     update_url = f"{self.supabase_url}/rest/v1/{TABLE_NAME}?id=eq.{record_id}"
                     requests.patch(update_url, headers=self.headers, json=data)
                     updated += 1
-                    logging.info(f"Updated: {item['name']}")
+                    logging.info(f"Updated with AI: {item['name']}")
                 else:
-                    # Insert via HTTP POST
+                    # Insert
                     data['created_at'] = datetime.now().isoformat()
                     insert_url = f"{self.supabase_url}/rest/v1/{TABLE_NAME}"
                     requests.post(insert_url, headers=self.headers, json=data)
                     inserted += 1
-                    logging.info(f"Inserted: {item['name']}")
+                    logging.info(f"Inserted with AI: {item['name']}")
                 
             except Exception as e:
                 logging.error(f"Error: {item['name']} - {e}")
@@ -167,19 +249,19 @@ class CaragaPriceScraper:
         logging.info("="*60)
         logging.info(f"Processing PDF: {pdf_url}")
         
-        print("\nDownloading PDF...")
+        print("\n📥 Downloading PDF...")
         pdf_file = self.download_pdf(pdf_url)
         
         if not pdf_file:
             return False
         
-        print("Extracting...")
+        print("📊 Extracting commodity data...")
         commodities = self.extract_commodity_data(pdf_file)
         
         if not commodities:
             return False
         
-        print(f"Saving {len(commodities)} items...")
+        print(f"💾 Saving {len(commodities)} items with AI nutrition...")
         count = self.insert_to_supabase(commodities)
         
         print(f"✅ Done! Processed {count} items")
@@ -187,7 +269,6 @@ class CaragaPriceScraper:
 
 
 def main(pdf_url=None):
-    """Main entry point"""
     scraper = CaragaPriceScraper()
     return scraper.run(pdf_url)
 
