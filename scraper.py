@@ -5,7 +5,6 @@ from datetime import datetime
 import logging
 import os
 import json
-from groq import Groq
 from config import SUPABASE_URL, SUPABASE_ANON_KEY, GROQ_API_KEY, TABLE_NAME, LOG_FILE, LOG_LEVEL
 
 # Setup logging
@@ -31,13 +30,14 @@ class CaragaPriceScraper:
             'Prefer': 'return=representation'
         }
         
-        # Initialize Groq AI
-        self.groq_client = Groq(api_key=GROQ_API_KEY)
+        # Groq API settings
+        self.groq_api_key = GROQ_API_KEY
+        self.groq_url = "https://api.groq.com/openai/v1/chat/completions"
         
         logging.info("Scraper initialized with AI enrichment")
         
     def get_ai_nutrition(self, name, category):
-        """Get nutritional data from Llama 3.3 70B via Groq"""
+        """Get nutritional data from Llama 3.3 70B via direct HTTP"""
         try:
             prompt = f"""
 Provide accurate nutritional information for this ingredient:
@@ -64,18 +64,28 @@ Return ONLY a valid JSON object (no markdown, no explanation) with these exact f
 Use standard nutrition databases. Be accurate and scientific.
 """
             
-            response = self.groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
+            # Direct HTTP request to Groq API
+            headers = {
+                "Authorization": f"Bearer {self.groq_api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            payload = {
+                "model": "llama-3.3-70b-versatile",
+                "messages": [
                     {"role": "system", "content": "You are a nutrition expert. Return only valid JSON."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.5,
-                max_tokens=1000
-            )
+                "temperature": 0.3,
+                "max_tokens": 1000
+            }
             
-            # Parse AI response
-            ai_response = response.choices[0].message.content.strip()
+            response = requests.post(self.groq_url, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            
+            # Parse response
+            result = response.json()
+            ai_response = result['choices'][0]['message']['content'].strip()
             
             # Remove markdown code blocks if present
             if ai_response.startswith('```'):
