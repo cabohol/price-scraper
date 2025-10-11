@@ -6,9 +6,6 @@ import logging
 import os
 from config import SUPABASE_URL, SUPABASE_ANON_KEY, TABLE_NAME, LOG_FILE, LOG_LEVEL
 
-# Updated Supabase import
-from supabase import create_client, Client
-
 # Setup logging
 os.makedirs('logs', exist_ok=True)
 logging.basicConfig(
@@ -22,13 +19,16 @@ logging.basicConfig(
 
 class CaragaPriceScraper:
     def __init__(self):
-        """Initialize Supabase client"""
-        try:
-            self.supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
-            logging.info("Scraper initialized successfully")
-        except Exception as e:
-            logging.error(f"Failed to initialize Supabase client: {e}")
-            raise
+        """Initialize with direct HTTP requests - NO SUPABASE LIBRARY"""
+        self.supabase_url = SUPABASE_URL
+        self.supabase_key = SUPABASE_ANON_KEY
+        self.headers = {
+            'apikey': self.supabase_key,
+            'Authorization': f'Bearer {self.supabase_key}',
+            'Content-Type': 'application/json',
+            'Prefer': 'return=representation'
+        }
+        logging.info("Scraper initialized (direct HTTP)")
         
     def download_pdf(self, pdf_url):
         """Download PDF from URL"""
@@ -85,7 +85,6 @@ class CaragaPriceScraper:
                             average_price_str = (row[-1] or "").strip()
                             
                             if commodity_group in EXCLUDED_CATEGORIES:
-                                logging.info(f"Skipping: {commodity_name} ({commodity_group})")
                                 continue
                             
                             if not commodity_name or not average_price_str:
@@ -97,7 +96,6 @@ class CaragaPriceScraper:
                                 commodities.append({
                                     'name': commodity_name,
                                     'category': commodity_group,
-                                    'specification': specification,
                                     'unit': unit or 'kg',
                                     'average_price': avg_price
                                 })
@@ -105,30 +103,30 @@ class CaragaPriceScraper:
                             except (ValueError, AttributeError):
                                 continue
             
-            logging.info(f"Extracted {len(commodities)} food commodities")
+            logging.info(f"Extracted {len(commodities)} commodities")
             
         except Exception as e:
-            logging.error(f"Error extracting data: {e}")
+            logging.error(f"Error extracting: {e}")
         
         return commodities
     
     def insert_to_supabase(self, commodities):
-        """Insert commodities into Supabase"""
+        """Insert using direct HTTP requests"""
         if not commodities:
-            logging.warning("No commodities to insert")
             return 0
         
-        inserted_count = 0
-        updated_count = 0
+        inserted = 0
+        updated = 0
         
         for item in commodities:
             try:
                 price_range = f"₱{item['average_price']:.2f} per {item['unit']}"
                 
-                # Check if exists
-                result = self.supabase.table(TABLE_NAME).select('id').eq('name', item['name']).execute()
+                # Check if exists via HTTP
+                check_url = f"{self.supabase_url}/rest/v1/{TABLE_NAME}?name=eq.{item['name']}&select=id"
+                check_response = requests.get(check_url, headers=self.headers)
                 
-                ingredient_data = {
+                data = {
                     'name': item['name'],
                     'category': item['category'],
                     'typical_serving_size': f"100 {item['unit']}",
@@ -138,37 +136,38 @@ class CaragaPriceScraper:
                     'updated_at': datetime.now().isoformat()
                 }
                 
-                if result.get('data') and len(result['data']) > 0:
-                    # Update
-                    self.supabase.table(TABLE_NAME).update(ingredient_data).eq('id', result['data'][0]['id']).execute()
-                    updated_count += 1
+                if check_response.json():
+                    # Update via HTTP PATCH
+                    record_id = check_response.json()[0]['id']
+                    update_url = f"{self.supabase_url}/rest/v1/{TABLE_NAME}?id=eq.{record_id}"
+                    requests.patch(update_url, headers=self.headers, json=data)
+                    updated += 1
                     logging.info(f"Updated: {item['name']}")
                 else:
-                    # Insert
-                    ingredient_data['created_at'] = datetime.now().isoformat()
-                    self.supabase.table(TABLE_NAME).insert(ingredient_data).execute()
-                    inserted_count += 1
+                    # Insert via HTTP POST
+                    data['created_at'] = datetime.now().isoformat()
+                    insert_url = f"{self.supabase_url}/rest/v1/{TABLE_NAME}"
+                    requests.post(insert_url, headers=self.headers, json=data)
+                    inserted += 1
                     logging.info(f"Inserted: {item['name']}")
                 
             except Exception as e:
                 logging.error(f"Error: {item['name']} - {e}")
                 continue
         
-        logging.info(f"Inserted: {inserted_count}, Updated: {updated_count}")
-        return inserted_count + updated_count
+        logging.info(f"Inserted: {inserted}, Updated: {updated}")
+        return inserted + updated
     
     def run(self, pdf_url):
         """Main function"""
         logging.info("="*60)
-        logging.info(f"PDF: {pdf_url}")
-        
         print("\nDownloading PDF...")
         pdf_file = self.download_pdf(pdf_url)
         
         if not pdf_file:
             return False
         
-        print("Extracting data...")
+        print("Extracting...")
         commodities = self.extract_commodity_data(pdf_file)
         
         if not commodities:
@@ -179,14 +178,3 @@ class CaragaPriceScraper:
         
         print("✅ Done!")
         return True
-
-
-def main(pdf_url=None):
-    scraper = CaragaPriceScraper()
-    return scraper.run(pdf_url)
-
-
-if __name__ == "__main__":
-    import sys
-    pdf_url = sys.argv[1] if len(sys.argv) > 1 else None
-    main(pdf_url)
