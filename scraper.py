@@ -16,6 +16,7 @@ PHILIPPINE_TZ = pytz.timezone('Asia/Manila')
 def get_philippine_timestamp():
     """Get current timestamp in Philippine timezone"""
     return datetime.now(PHILIPPINE_TZ).isoformat()
+
 # Setup logging
 os.makedirs('logs', exist_ok=True)
 logging.basicConfig(
@@ -189,6 +190,14 @@ CRITICAL RULES:
             'LIVESTOCK & POULTRY FEEDS'
         ]
         
+        # ✅ ADD: Excluded item patterns as backup
+        EXCLUDED_ITEMS = [
+            'HOG BOOSTER', 'HOG PRE-STARTER', 'HOG STARTER', 'HOG GROWER', 
+            'HOG FINISHER', 'LACTATING', 'GESTATING', 
+            'CHICK BOOSTER', 'CHICK PRE-STARTER', 'CHICK STARTER', 'CHICK GROWER',
+            'LAYER MASH', 'LAYER 1', 'LAYER 2'
+        ]
+        
         try:
             logging.info("Extracting data from PDF...")
             with pdfplumber.open(pdf_file) as pdf:
@@ -209,7 +218,7 @@ CRITICAL RULES:
                             commodity_group_raw = (row[0] or "").strip()
                             
                             if commodity_group_raw:
-                                current_category = commodity_group_raw.upper()
+                                current_category = commodity_group_raw.upper().strip()
                             
                             commodity_group = current_category
                             commodity_name = (row[1] or "").strip()
@@ -217,10 +226,18 @@ CRITICAL RULES:
                             unit = (row[3] or "").strip()
                             average_price_str = (row[-1] or "").strip()
                             
-                            if commodity_group in EXCLUDED_CATEGORIES:
+                            # ✅ SKIP if no name or price FIRST
+                            if not commodity_name or not average_price_str:
                                 continue
                             
-                            if not commodity_name or not average_price_str:
+                            # ✅ NOW check exclusions (after we know there's an actual item)
+                            if commodity_group in EXCLUDED_CATEGORIES:
+                                logging.info(f"🚫 EXCLUDED by category: {commodity_name} ({commodity_group})")
+                                continue
+                            
+                            # ✅ BACKUP: Check if item name matches excluded patterns
+                            if any(pattern in commodity_name.upper() for pattern in EXCLUDED_ITEMS):
+                                logging.info(f"🚫 EXCLUDED by name pattern: {commodity_name}")
                                 continue
                             
                             try:
@@ -233,6 +250,8 @@ CRITICAL RULES:
                                     'unit': unit or 'kg',
                                     'average_price': avg_price
                                 })
+                                
+                                logging.info(f"✅ Added to queue: {commodity_name} ({commodity_group})")
                                 
                             except (ValueError, AttributeError):
                                 continue
@@ -268,12 +287,16 @@ CRITICAL RULES:
             try:
                 estimated_price = f"₱{item['average_price']:.2f} per {item['unit']}"
                 
-                from urllib.parse import quote
-                encoded_name = quote(item['name'])
-                
-                # Check if exists and get ALL nutrition fields
-                check_url = f"{self.supabase_url}/rest/v1/{TABLE_NAME}?name=eq.{encoded_name}&select=id,carbs_per_100g,calories_per_100g,protein_per_100g,fat_per_100g,fiber_per_100g,glycemic_index,common_allergens"
-                check_response = requests.get(check_url, headers=self.headers)
+                # ✅ CORRECT WAY - Use params instead of manual encoding
+                check_url = f"{self.supabase_url}/rest/v1/{TABLE_NAME}"
+                check_response = requests.get(
+                    check_url, 
+                    headers=self.headers,
+                    params={
+                        "name": f"eq.{item['name']}",
+                        "select": "id,carbs_per_100g,calories_per_100g,protein_per_100g,fat_per_100g,fiber_per_100g,glycemic_index,common_allergens"
+                    }
+                )
                 
                 if check_response.json():
                     # EXISTING ingredient
@@ -305,9 +328,19 @@ CRITICAL RULES:
                         }
                         logging.info(f"🔧 Fixed NULLs: {item['name']}")
                     
-                    update_url = f"{self.supabase_url}/rest/v1/{TABLE_NAME}?id=eq.{record_id}"
-                    requests.patch(update_url, headers=self.headers, json=data)
-                    updated += 1
+                    update_url = f"{self.supabase_url}/rest/v1/{TABLE_NAME}"
+                    update_response = requests.patch(
+                        update_url, 
+                        headers=self.headers, 
+                        json=data,
+                        params={"id": f"eq.{record_id}"}
+                    )
+                    
+                    # ✅ ADD ERROR CHECKING
+                    if update_response.status_code >= 400:
+                        logging.error(f"❌ Update failed for {item['name']}: {update_response.text}")
+                    else:
+                        updated += 1
                     
                 else:
                     # ➕ NEW ingredient - Get complete AI nutrition
@@ -322,15 +355,20 @@ CRITICAL RULES:
                         'typical_serving_size': f"{item['unit']}",
                         'estimated_price': estimated_price,
                         'availability': 'available',
-                        'created_at': get_philippine_timestamp() ,
+                        'created_at': get_philippine_timestamp(),
                         'updated_at': get_philippine_timestamp(),
                         **nutrition
                     }
                     
                     insert_url = f"{self.supabase_url}/rest/v1/{TABLE_NAME}"
-                    requests.post(insert_url, headers=self.headers, json=data)
-                    inserted += 1
-                    logging.info(f"➕ Inserted: {item['name']}")
+                    insert_response = requests.post(insert_url, headers=self.headers, json=data)
+                    
+                    # ✅ ADD ERROR CHECKING
+                    if insert_response.status_code >= 400:
+                        logging.error(f"❌ Insert failed for {item['name']}: {insert_response.text}")
+                    else:
+                        inserted += 1
+                        logging.info(f"➕ Inserted: {item['name']}")
                 
             except Exception as e:
                 logging.error(f"❌ Error: {item['name']} - {e}")
@@ -371,7 +409,7 @@ CRITICAL RULES:
                 update_url = f"{self.supabase_url}/rest/v1/{TABLE_NAME}?id=eq.{record['id']}"
                 requests.patch(update_url, headers=self.headers, json={
                     **nutrition,
-                    'updated_at': datetime.now().isoformat()
+                    'updated_at': get_philippine_timestamp()
                 })
                 fixed += 1
                 print(f"   ✅ Fixed!")
