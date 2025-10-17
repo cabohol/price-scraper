@@ -7,7 +7,15 @@ import os
 import json
 import time
 from config import SUPABASE_URL, SUPABASE_ANON_KEY, GROQ_API_KEY, TABLE_NAME, LOG_FILE, LOG_LEVEL
+import pytz
 
+
+# Add this constant after imports
+PHILIPPINE_TZ = pytz.timezone('Asia/Manila')
+
+def get_philippine_timestamp():
+    """Get current timestamp in Philippine timezone"""
+    return datetime.now(PHILIPPINE_TZ).isoformat()
 # Setup logging
 os.makedirs('logs', exist_ok=True)
 logging.basicConfig(
@@ -49,11 +57,11 @@ Category: {category}
 
 Return ONLY a valid JSON object (no markdown, no explanation) with these exact fields:
 {{
-    "carbs_grams": <float - carbohydrates per 100g, MUST be a number>,
-    "calories_per_serving": <int - calories per 100g serving, MUST be a number>,
-    "protein_grams": <float - protein per 100g, MUST be a number>,
-    "fat_grams": <float - total fat per 100g, MUST be a number>,
-    "fiber_grams": <float - dietary fiber per 100g, MUST be a number>,
+    "carbs_per_100g": <float - carbohydrates per 100g, MUST be a number>,
+    "calories_per_100g": <int - calories per 100g serving, MUST be a number>,
+    "protein_per_100g": <float - protein per 100g, MUST be a number>,
+    "fat_per_100g": <float - total fat per 100g, MUST be a number>,
+    "fiber_per_100g": <float - dietary fiber per 100g, MUST be a number>,
     "glycemic_index": <int - 0-100, estimate if unknown, MUST be a number>,
     "is_diabetic_friendly": <bool - low GI and suitable for diabetics>,
     "is_vegetarian": "<bool - true if contains no meat, poultry, or fish; may include dairy or eggs>",
@@ -103,11 +111,11 @@ CRITICAL RULES:
             
             # FORCE all fields to have values - NO NULLS ALLOWED
             validated_data = {
-                "carbs_grams": float(nutrition_data.get('carbs_grams') or 0.0),
-                "calories_per_serving": int(nutrition_data.get('calories_per_serving') or 0),
-                "protein_grams": float(nutrition_data.get('protein_grams') or 0.0),
-                "fat_grams": float(nutrition_data.get('fat_grams') or 0.0),
-                "fiber_grams": float(nutrition_data.get('fiber_grams') or 0.0),
+                "carbs_per_100g": float(nutrition_data.get('carbs_per_100g') or 0.0),
+                "calories_per_100g": int(nutrition_data.get('calories_per_100g') or 0),
+                "protein_per_100g": float(nutrition_data.get('protein_per_100g') or 0.0),
+                "fat_per_100g": float(nutrition_data.get('fat_per_100g') or 0.0),
+                "fiber_per_100g": float(nutrition_data.get('fiber_per_100g') or 0.0),
                 "glycemic_index": int(nutrition_data.get('glycemic_index') or 50),
                 "is_diabetic_friendly": bool(nutrition_data.get('is_diabetic_friendly', True)),
                 "is_vegetarian": bool(nutrition_data.get('is_vegetarian', True)),
@@ -139,11 +147,11 @@ CRITICAL RULES:
     def get_default_nutrition(self):
         """Return safe default nutrition values - GUARANTEED NO NULLS"""
         return {
-            "carbs_grams": 0.0,
-            "calories_per_serving": 0,
-            "protein_grams": 0.0,
-            "fat_grams": 0.0,
-            "fiber_grams": 0.0,
+            "carbs_per_100g": 0.0,
+            "calories_per_100g": 0,
+            "protein_per_100g": 0.0,
+            "fat_per_100g": 0.0,
+            "fiber_per_100g": 0.0,
             "glycemic_index": 50,
             "is_diabetic_friendly": True,
             "is_vegetarian": True,
@@ -177,7 +185,8 @@ CRITICAL RULES:
             'MOLLUSCIDE', 
             'RODENTICIDE',
             'PESTICIDE',
-            'FUNGICIDE'
+            'FUNGICIDE',
+            'LIVESTOCK & POULTRY FEEDS'
         ]
         
         try:
@@ -204,6 +213,7 @@ CRITICAL RULES:
                             
                             commodity_group = current_category
                             commodity_name = (row[1] or "").strip()
+                            specifications = (row[2] or "").strip()
                             unit = (row[3] or "").strip()
                             average_price_str = (row[-1] or "").strip()
                             
@@ -219,6 +229,7 @@ CRITICAL RULES:
                                 commodities.append({
                                     'name': commodity_name,
                                     'category': commodity_group,
+                                    'specifications': specifications or None,
                                     'unit': unit or 'kg',
                                     'average_price': avg_price
                                 })
@@ -236,8 +247,8 @@ CRITICAL RULES:
     def has_any_null_nutrition(self, record):
         """Check if any nutrition field is NULL"""
         nutrition_fields = [
-            'carbs_grams', 'calories_per_serving', 'protein_grams', 
-            'fat_grams', 'fiber_grams', 'glycemic_index', 'common_allergens'
+            'carbs_per_100g', 'calories_per_100g', 'protein_per_100g', 
+            'fat_per_100g', 'fiber_per_100g', 'glycemic_index', 'common_allergens'
         ]
         
         for field in nutrition_fields:
@@ -255,13 +266,13 @@ CRITICAL RULES:
         
         for item in commodities:
             try:
-                price_range = f"₱{item['average_price']:.2f} per {item['unit']}"
+                estimated_price = f"₱{item['average_price']:.2f} per {item['unit']}"
                 
                 from urllib.parse import quote
                 encoded_name = quote(item['name'])
                 
                 # Check if exists and get ALL nutrition fields
-                check_url = f"{self.supabase_url}/rest/v1/{TABLE_NAME}?name=eq.{encoded_name}&select=id,carbs_grams,calories_per_serving,protein_grams,fat_grams,fiber_grams,glycemic_index,common_allergens"
+                check_url = f"{self.supabase_url}/rest/v1/{TABLE_NAME}?name=eq.{encoded_name}&select=id,carbs_per_100g,calories_per_100g,protein_per_100g,fat_per_100g,fiber_per_100g,glycemic_index,common_allergens"
                 check_response = requests.get(check_url, headers=self.headers)
                 
                 if check_response.json():
@@ -273,10 +284,10 @@ CRITICAL RULES:
                     if not has_nulls:
                         # ✅ COMPLETE DATA - Update price only
                         data = {
-                            'price_range': price_range,
-                            'cost_per_serving': item['average_price'],
+                            'specifications': item.get('specifications'),
+                            'estimated_price': estimated_price,
                             'availability': 'available',
-                            'updated_at': datetime.now().isoformat()
+                            'updated_at': get_philippine_timestamp() 
                         }
                         logging.info(f"✅ Price update: {item['name']}")
                     else:
@@ -286,10 +297,10 @@ CRITICAL RULES:
                         time.sleep(3)  # Rate limit protection
                         
                         data = {
-                            'price_range': price_range,
-                            'cost_per_serving': item['average_price'],
+                            'specifications': item.get('specifications'),
+                            'estimated_price': estimated_price,
                             'availability': 'available',
-                            'updated_at': datetime.now().isoformat(),
+                            'updated_at': get_philippine_timestamp(),
                             **nutrition  # This will overwrite ALL nutrition fields
                         }
                         logging.info(f"🔧 Fixed NULLs: {item['name']}")
@@ -307,12 +318,12 @@ CRITICAL RULES:
                     data = {
                         'name': item['name'],
                         'category': item['category'],
-                        'typical_serving_size': f"100 {item['unit']}",
-                        'price_range': price_range,
-                        'cost_per_serving': item['average_price'],
+                        'specifications': item.get('specifications'),
+                        'typical_serving_size': f"{item['unit']}",
+                        'estimated_price': estimated_price,
                         'availability': 'available',
-                        'created_at': datetime.now().isoformat(),
-                        'updated_at': datetime.now().isoformat(),
+                        'created_at': get_philippine_timestamp() ,
+                        'updated_at': get_philippine_timestamp(),
                         **nutrition
                     }
                     
@@ -333,7 +344,7 @@ CRITICAL RULES:
         print("\n🔍 Scanning for NULL records in database...")
         
         # Get all records with ANY NULL nutrition field
-        url = f"{self.supabase_url}/rest/v1/{TABLE_NAME}?select=id,name,category,carbs_grams,calories_per_serving,common_allergens"
+        url = f"{self.supabase_url}/rest/v1/{TABLE_NAME}?select=id,name,category,carbs_per_100g,calories_per_100g,common_allergens"
         response = requests.get(url, headers=self.headers)
         
         if not response.json():
