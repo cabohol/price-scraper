@@ -45,6 +45,15 @@ class CaragaPriceScraper:
         self.groq_url = "https://api.groq.com/openai/v1/chat/completions"
         
         logging.info("Scraper initialized with AI enrichment")
+    
+    def _format_allergens(self, allergen_string):
+        """Convert allergen string to array format for PostgreSQL"""
+        if not allergen_string or allergen_string.lower() == "none":
+            return []  # Empty array
+        
+        # Split by comma and clean up
+        allergens = [a.strip() for a in allergen_string.split(',')]
+        return allergens
         
     def get_ai_nutrition(self, name, category, retry_count=0):
         """Get nutritional data from Llama 3.3 70B with retry logic"""
@@ -124,7 +133,7 @@ CRITICAL RULES:
                 "is_halal": bool(nutrition_data.get('is_halal', True)),
                 "is_kosher": bool(nutrition_data.get('is_kosher', True)),
                 "is_catholic": bool(nutrition_data.get('is_catholic', True)),
-                "common_allergens": str(nutrition_data.get('common_allergens') or "none")
+                "common_allergens": self._format_allergens(str(nutrition_data.get('common_allergens') or "none"))
             }
             
             logging.info(f"✅ AI nutrition obtained for {name}")
@@ -160,7 +169,7 @@ CRITICAL RULES:
             "is_halal": True,
             "is_kosher": True,
             "is_catholic": True,
-            "common_allergens": "none"
+             "common_allergens": []
         }
     
     def download_pdf(self, pdf_url):
@@ -195,7 +204,7 @@ CRITICAL RULES:
             'HOG BOOSTER', 'HOG PRE-STARTER', 'HOG STARTER', 'HOG GROWER', 
             'HOG FINISHER', 'LACTATING', 'GESTATING', 
             'CHICK BOOSTER', 'CHICK PRE-STARTER', 'CHICK STARTER', 'CHICK GROWER',
-            'LAYER MASH', 'LAYER 1', 'LAYER 2'
+            'LAYER MASH', 'LAYER 1', 'LAYER 2', 'CRACK CORN'
         ]
         
         try:
